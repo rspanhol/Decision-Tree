@@ -1,0 +1,169 @@
+---
+title: "Árboles de Decisión_Predicción de Diabetes"
+format: html
+editor: visual
+---
+
+# Clasificación con el uso de árboles de decisión con el ecosistema tidymodels:
+
+### Cargar paquetes:
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(GGally)
+```
+
+### Carga y limpieza de los datos
+
+```{r}
+
+diabetes <- read_csv("https://raw.githubusercontent.com/rspanhol/Decision-Tree/main/pima-indians-diabetes.csv")
+
+```
+
+```{r}
+diabetes %>% glimpse()
+```
+
+Conversión de la variable clase a variable categórica
+
+```{r}
+diabetes <- diabetes %>% mutate(clase = factor(clase, labels =c("negativo", "positivo")))
+```
+
+Cambiar el orden de los niveles en la variable "clase"
+
+```{r}
+diabetes <- diabetes %>% mutate(clase = fct_relevel(clase,"positivo"))
+```
+
+### Análisis Exploratorio de los datos
+
+```{r}
+skim(diabetes)
+```
+
+### Evaluación gráfica
+
+```{r}
+ggpairs(diabetes, aes(color = clase))
+```
+
+### Preparación de los datos
+
+```{r}
+set.seed(777)
+diabetes_split <- initial_split(diabetes, prop=0.75, strata = clase)
+
+diabetes_train <- training(diabetes_split)
+diabetes_test <- testing(diabetes_split)
+
+#### Cración de la validación cruzada #####
+set.seed(777)
+diabetes_folds <- vfold_cv(diabetes_train)
+
+```
+
+### Especificación del modelo
+
+```{r}
+tree_spec <- decision_tree(cost_complexity=tune(), tree_depth = tune(), min_n = tune()) %>% 
+             set_engine("rpart") %>% 
+            set_mode("classification")
+
+tree_spec
+```
+
+###  Preprocesamiento de los datos
+
+```{r}
+tree_recipe <- recipe(clase ~.,
+                      data = diabetes_train) %>%
+                themis::step_downsample(clase)
+```
+
+### Flujo de trabajo
+
+```{r}
+tree_wf <- workflow() %>% 
+            add_recipe(tree_recipe) %>%
+            add_model(tree_spec)
+```
+
+### Demostración del balanceo de las clases
+
+```{r}
+recipe_prep <- tree_recipe %>% prep(diabetes_train)
+
+juice(recipe_prep) %>% tabyl(clase)
+```
+
+## Implementación del modelo
+
+```{r}
+tree_random_grid <- grid_random(parameters(tree_spec),
+                                size= 30)
+```
+
+```{r}
+library(tictoc)
+parallel::detectCores()
+clus <- parallel::makeCluster(8)
+doParallel::registerDoParallel(clus)
+tic()
+tree_res <- 
+  tree_wf %>%
+  tune_grid(
+    resamples = diabetes_folds,
+    grid = tree_random_grid,
+    control = control_grid(save_pred = T),
+    metrics = metric_set(roc_auc)
+  )
+parallel::stopCluster(clus)
+toc()
+```
+
+#Evaluación de los resultados
+
+```{r}
+collect_metrics(tree_res)
+
+
+```
+
+```{r}
+tree_best <- tree_res %>% select_best(metric= "roc_auc")
+```
+
+## Finalización del modelo
+
+```{r}
+tree_model_final <- tree_spec %>% finalize_model(tree_best)
+tree_recipe_final <- tree_recipe %>% finalize_recipe(tree_best)
+```
+
+## Ajuste del modelo final
+
+```{r}
+tree_wf_final <- tree_wf %>% 
+  update_recipe(tree_recipe_final) %>% 
+  update_model(tree_model_final)
+
+tree_fit <- last_fit(tree_wf_final, split = diabetes_split)
+```
+
+```{r}
+tree_fit %>% collect_metrics()
+```
+
+## Curva ROC
+
+```{r}
+tree_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(truth= clase, estimate= .pred_positivo) %>% 
+  autoplot()
+```
